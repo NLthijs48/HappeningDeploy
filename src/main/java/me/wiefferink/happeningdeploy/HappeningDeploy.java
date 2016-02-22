@@ -12,18 +12,23 @@ import org.apache.http.util.EntityUtils;
 import java.io.*;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 public class HappeningDeploy {
 
-	private File self = new File(HappeningDeploy.class.getProtectionDomain().getCodeSource().getLocation().getPath());
+	private File self;
+	private Set<String> filteredFiles;
 
 	public HappeningDeploy(String[] args) {
+		self = new File(HappeningDeploy.class.getProtectionDomain().getCodeSource().getLocation().getPath());
+
 		String deployKey = null;
 		String url = null;
 		String directory = null;
-		File directoryFile = null;
+		File directoryFile;
 		// Check arguments
 		for(String arg : args) {
 			if(deployKey == null) {
@@ -40,24 +45,38 @@ public class HappeningDeploy {
 		if(directory == null) {
 			// Set to directory we are running in
 			directory = System.getProperty("user.dir");
-			directoryFile = new File(directory);
-			if(!directoryFile.exists()) {
-				error("Specified directory does not exist: "+directoryFile.getAbsolutePath());
-				return;
-			}
 		}
+		directoryFile = new File(directory);
+		if(!directoryFile.exists()) {
+			error("Specified directory does not exist: "+directoryFile.getAbsolutePath());
+			return;
+		}
+
 		if(deployKey == null) {
 			File deploykeyFile = new File(directoryFile.getAbsolutePath() + File.separator + ".deploykey");
 			try (BufferedReader reader = new BufferedReader(new FileReader(deploykeyFile))) {
 				deployKey = reader.readLine();
 			} catch (IOException ignore) {}
-			if(deployKey == null || deployKey.isEmpty()) {
-				error("No deploy key specified, specify as first argument or put it in the .deploykey file");
-				return;
-			}
 		}
+		if(deployKey == null || deployKey.isEmpty()) {
+			error("No deploy key specified, specify as first argument or put it in the .deploykey file");
+			return;
+		}
+
 		if(url == null) {
 			url = "http://happening.im/plugin/";
+		}
+
+		// Get content of .deployignore
+		filteredFiles = new HashSet<>();
+		File deployIgnoreFile = new File(directoryFile.getAbsolutePath() + File.separator + ".deployignore");
+		try (BufferedReader reader = new BufferedReader(new FileReader(deployIgnoreFile))) {
+			String line = reader.readLine();
+			while(line != null) {
+				filteredFiles.add(line);
+				line = reader.readLine();
+			}
+		} catch (IOException ignore) {
 		}
 
 		upload(url, deployKey, directoryFile);
@@ -123,8 +142,10 @@ public class HappeningDeploy {
 		}
 		File zipTargetFile = new File(zipTarget);
 		if(zipTargetFile.exists()) {
-			error("  Target zip file already exists: "+zipTargetFile.getAbsolutePath());
-			return null;
+			if (!zipTargetFile.delete()) {
+				error("  Could not delete old temporary zip file: " + zipTargetFile.getAbsolutePath());
+				return null;
+			}
 		}
 		Set<File> files = getFilesRecursive(toZipFolderFile);
 		// Create leading directories
@@ -159,7 +180,7 @@ public class HappeningDeploy {
 	 * @return A list of all files in the directory
 	 */
 	public Set<File> getFilesRecursive(File start) {
-		return getFilesRecursive(start, new HashSet<File>());
+		return getFilesRecursive(start, start, new HashSet<File>());
 	}
 
 	/**
@@ -168,18 +189,26 @@ public class HappeningDeploy {
 	 * @param current The current list of files
 	 * @return A list of all files in the directory
 	 */
-	private Set<File> getFilesRecursive(File node, Set<File> current) {
-		// TODO filter by using .deployignore
+	private Set<File> getFilesRecursive(File node, File root, Set<File> current) {
 		if(node.isHidden() || node.equals(self)) {
 			return current;
 		}
+
 		if (node.isFile()) {
+			// Check .deployignore filter
+			String path = node.getAbsolutePath().substring(root.getAbsolutePath().length()+1);
+			for(String filter : filteredFiles) {
+				// Match complete relative path, allow leading directories like *nix zip does
+				if(Pattern.matches("^(.*"+ Matcher.quoteReplacement(File.separator)+")?"+filter.replace("*", ".*")+"$", path)) {
+					return current;
+				}
+			}
 			current.add(node);
 		} else if (node.isDirectory()) {
 			File[] files = node.listFiles();
 			if(files != null) {
 				for (File file : files) {
-					getFilesRecursive(file, current);
+					getFilesRecursive(file, root, current);
 				}
 			}
 		}
